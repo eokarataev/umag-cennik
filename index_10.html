@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Печать ценников UMAG</title>
+  <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.5/JsBarcode.all.min.js"></script>
+  <style>
+    :root{
+      --bg:#0f172a; --card:#1e293b; --line:#334155; --text:#e2e8f0; --muted:#94a3b8;
+      --accent:#22c55e; --danger:#ef4444; --warn:#f59e0b;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;}
+    #app{max-width:480px;margin:0 auto;padding:12px 12px 28px;}
+    h1{font-size:17px;font-weight:600;margin:8px 0 12px;text-align:center;color:var(--text);}
+
+    .cam-wrap{position:relative;width:100%;aspect-ratio:3/4;background:#000;
+      border-radius:14px;overflow:hidden;border:1px solid var(--line);}
+    video{width:100%;height:100%;object-fit:cover;display:block;}
+    .cam-frame{position:absolute;left:8%;right:8%;top:38%;bottom:38%;
+      border:3px solid var(--accent);border-radius:10px;box-shadow:0 0 0 999px rgba(0,0,0,.35);
+      pointer-events:none;}
+    .cam-hint{position:absolute;bottom:8px;left:0;right:0;text-align:center;
+      color:#fff;font-size:12px;text-shadow:0 1px 2px rgba(0,0,0,.8);}
+    .cam-off{display:flex;align-items:center;justify-content:center;height:100%;
+      color:var(--muted);font-size:13px;text-align:center;padding:20px;}
+
+    .manual{display:flex;gap:8px;margin-top:12px;}
+    .manual input{flex:1;padding:12px;border-radius:10px;border:1px solid var(--line);
+      background:var(--card);color:var(--text);font-size:16px;}
+    .manual button{padding:12px 16px;border-radius:10px;border:none;background:var(--line);
+      color:var(--text);font-size:14px;}
+
+    .card{margin-top:14px;background:var(--card);border:1px solid var(--line);
+      border-radius:14px;padding:16px;}
+    .card.found{border-color:var(--accent);}
+    .card.notfound{border-color:var(--danger);}
+    .card .name{font-size:16px;font-weight:600;margin-bottom:4px;}
+    .card .meta{font-size:12px;color:var(--muted);margin-bottom:10px;}
+    .card .price{font-size:28px;font-weight:700;color:var(--accent);}
+    .card.notfound .price{color:var(--danger);font-size:16px;font-weight:500;}
+
+    .row{display:flex;align-items:center;gap:10px;margin-top:14px;}
+    .qty{display:flex;align-items:center;gap:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;}
+    .qty button{width:40px;height:40px;background:var(--line);color:var(--text);border:none;font-size:18px;}
+    .qty input{width:42px;height:40px;text-align:center;border:none;background:var(--card);color:var(--text);font-size:15px;}
+    .btn{flex:1;height:44px;border-radius:10px;border:none;font-size:14px;font-weight:600;}
+    .btn-print{background:var(--accent);color:#052e16;}
+    .btn-again{background:var(--line);color:var(--text);}
+
+    .status{text-align:center;font-size:12px;color:var(--muted);margin-top:10px;min-height:16px;}
+    .status.err{color:var(--warn);}
+
+    /* ---- печатаемый ценник, скрыт на экране ---- */
+    #printArea{display:none;}
+
+    @media print{
+      @page{ size:58mm 40mm; margin:0; }
+      body *{ visibility:hidden !important; }
+      #printArea, #printArea *{ visibility:visible !important; }
+      #printArea{
+        display:block !important;
+        position:absolute; top:0; left:0;
+      }
+      .label{
+        width:58mm; height:40mm; padding:2mm 2.5mm;
+        display:flex; flex-direction:column; align-items:center; justify-content:space-between;
+        page-break-after:always; box-sizing:border-box; background:#fff; color:#000;
+      }
+      .label:last-child{page-break-after:auto;}
+      .label .lname{font-size:9.5pt;font-weight:700;line-height:1.15;text-align:center;
+        max-height:11mm; overflow:hidden; width:100%;}
+      .label .lprice{font-size:20pt;font-weight:800;text-align:center;margin:1mm 0;}
+      .label .lprice sup{font-size:11pt;font-weight:600;}
+      .label svg{width:100%; max-height:13mm;}
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <h1>🏷️ Печать ценников UMAG</h1>
+
+    <div class="cam-wrap">
+      <video id="video" muted playsinline autoplay></video>
+      <div class="cam-frame" id="camFrame" style="display:none"></div>
+      <div class="cam-hint" id="camHint" style="display:none">Наведите на штрихкод</div>
+      <div class="cam-off" id="camOff">Запрашиваю доступ к камере…</div>
+    </div>
+
+    <div class="manual">
+      <input id="manualInput" type="text" inputmode="numeric" placeholder="Или введите штрихкод вручную">
+      <button id="manualBtn">Найти</button>
+    </div>
+
+    <div class="card" id="resultCard" style="display:none"></div>
+    <div class="status" id="statusLine"></div>
+  </div>
+
+  <div id="printArea"></div>
+
+  <script>
+    // ⚠️ ВСТАВЬТЕ СЮДА ссылку вашего развёртывания Apps Script (со знаком
+    // /exec на конце). Берётся из таблицы "Ценники UMAG" → меню
+    // 🏷️ Ценники → "Показать адрес API".
+    var SCRIPT_URL = "ВСТАВЬТЕ_ССЫЛКУ_НА_APPS_SCRIPT_СЮДА";
+
+    var lastItem = null;
+    var locked = false;               // блокировка на время обработки скана/печати
+    var lastCode = null, lastCodeAt = 0;
+
+    var videoEl = document.getElementById('video');
+    var camFrame = document.getElementById('camFrame');
+    var camHint = document.getElementById('camHint');
+    var camOff = document.getElementById('camOff');
+    var resultCard = document.getElementById('resultCard');
+    var statusLine = document.getElementById('statusLine');
+    var manualInput = document.getElementById('manualInput');
+
+    function setStatus(msg, isErr){
+      statusLine.textContent = msg || '';
+      statusLine.className = 'status' + (isErr ? ' err' : '');
+    }
+
+    // ---------- Камера / сканирование (ZXing) ----------
+    var codeReader = null;
+    function startScanner(){
+      try {
+        var hints = new Map();
+        hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+          ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+          ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
+          ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39
+        ]);
+        codeReader = new ZXing.BrowserMultiFormatReader(hints);
+        codeReader.decodeFromConstraints(
+          { video: { facingMode: { ideal: 'environment' } } },
+          videoEl,
+          function(result, err){
+            if (result) {
+              onScan(result.getText());
+            }
+          }
+        );
+        camOff.style.display = 'none';
+        camFrame.style.display = 'block';
+        camHint.style.display = 'block';
+      } catch (e) {
+        camOff.style.display = 'flex';
+        camOff.textContent = 'Камера недоступна: ' + e + '. Используйте ручной ввод ниже.';
+      }
+    }
+
+    if (SCRIPT_URL.indexOf('ВСТАВЬТЕ_ССЫЛКУ') === 0) {
+      camOff.textContent = 'Не настроено: откройте index.html и вставьте ссылку на Apps Script в переменную SCRIPT_URL (см. комментарий в коде).';
+      setStatus('SCRIPT_URL не задан', true);
+    } else if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      startScanner();
+    } else {
+      camOff.textContent = 'Браузер не поддерживает камеру. Используйте ручной ввод ниже.';
+    }
+
+    function onScan(rawCode){
+      var now = Date.now();
+      if (locked) return;
+      if (rawCode === lastCode && (now - lastCodeAt) < 3000) return; // защита от повторного скана
+      lastCode = rawCode; lastCodeAt = now;
+      handleCode(rawCode);
+    }
+
+    // ---------- Ручной ввод ----------
+    document.getElementById('manualBtn').addEventListener('click', function(){
+      var v = manualInput.value.trim();
+      if (v) handleCode(v);
+    });
+    manualInput.addEventListener('keydown', function(e){
+      if (e.key === 'Enter') {
+        var v = manualInput.value.trim();
+        if (v) handleCode(v);
+      }
+    });
+
+    // ---------- Обработка кода: найти товар → показать → напечатать ----------
+    function handleCode(rawCode){
+      if (locked) return;
+      locked = true;
+      setStatus('Ищу товар…');
+      if (navigator.vibrate) navigator.vibrate(40);
+
+      fetch(SCRIPT_URL + '?action=lookup&barcode=' + encodeURIComponent(rawCode))
+        .then(function(r){ return r.json(); })
+        .then(function(res){ onLookupResult(res); })
+        .catch(function(err){
+          setStatus('Ошибка запроса: ' + err, true);
+          unlockSoon();
+        });
+    }
+
+    function onLookupResult(res){
+      if (res && res.found) {
+        lastItem = res;
+        showFound(res);
+        setStatus('Печать…');
+        // короткая пауза, чтобы кассир увидел товар перед печатью
+        setTimeout(function(){ printLabel(1); }, 350);
+      } else {
+        lastItem = null;
+        showNotFound(res && res.scanned || '');
+        setStatus('Товар не найден в УМАГ_ТОВАРЫ', true);
+        unlockSoon();
+      }
+    }
+
+    function showFound(item){
+      resultCard.style.display = 'block';
+      resultCard.className = 'card found';
+      resultCard.innerHTML =
+        '<div class="name">' + escapeHtml(item.name) + '</div>' +
+        '<div class="meta">' + escapeHtml(item.category || '') + ' · ШК ' + escapeHtml(item.barcode) + '</div>' +
+        '<div class="price">' + formatPrice(item.price) + ' ₸</div>' +
+        '<div class="row">' +
+          '<div class="qty">' +
+            '<button type="button" id="qtyMinus">−</button>' +
+            '<input id="qtyVal" type="text" inputmode="numeric" value="1">' +
+            '<button type="button" id="qtyPlus">+</button>' +
+          '</div>' +
+          '<button class="btn btn-print" id="reprintBtn">🖨️ Ещё копии</button>' +
+        '</div>' +
+        '<div class="row"><button class="btn btn-again" id="scanAgainBtn">🔄 Сканировать следующий</button></div>';
+
+      document.getElementById('qtyMinus').onclick = function(){ stepQty(-1); };
+      document.getElementById('qtyPlus').onclick = function(){ stepQty(1); };
+      document.getElementById('reprintBtn').onclick = function(){
+        var q = parseInt(document.getElementById('qtyVal').value, 10) || 1;
+        printLabel(q);
+      };
+      document.getElementById('scanAgainBtn').onclick = function(){ resetForNextScan(); };
+    }
+
+    function stepQty(delta){
+      var el = document.getElementById('qtyVal');
+      var v = (parseInt(el.value, 10) || 1) + delta;
+      if (v < 1) v = 1;
+      if (v > 20) v = 20;
+      el.value = v;
+    }
+
+    function showNotFound(code){
+      resultCard.style.display = 'block';
+      resultCard.className = 'card notfound';
+      resultCard.innerHTML =
+        '<div class="name">Штрихкод не найден</div>' +
+        '<div class="meta">Отсканировано: ' + escapeHtml(code) + '</div>' +
+        '<div class="price">Нет в списке УМАГ_ТОВАРЫ</div>' +
+        '<div class="row"><button class="btn btn-again" id="scanAgainBtn2">🔄 Сканировать ещё</button></div>';
+      document.getElementById('scanAgainBtn2').onclick = function(){ resetForNextScan(); };
+    }
+
+    function resetForNextScan(){
+      resultCard.style.display = 'none';
+      setStatus('');
+      lastCode = null;
+      locked = false;
+    }
+
+    // ---------- Печать ----------
+    function printLabel(qty){
+      if (!lastItem) { locked = false; return; }
+      qty = Math.max(1, Math.min(20, qty || 1));
+
+      var printArea = document.getElementById('printArea');
+      printArea.innerHTML = '';
+      for (var i = 0; i < qty; i++){
+        var label = document.createElement('div');
+        label.className = 'label';
+        var svgId = 'bc_' + i;
+        label.innerHTML =
+          '<div class="lname">' + escapeHtml(lastItem.name) + '</div>' +
+          '<div class="lprice">' + formatPrice(lastItem.price) + ' <sup>₸</sup></div>' +
+          '<svg id="' + svgId + '"></svg>';
+        printArea.appendChild(label);
+      }
+
+      // рендерим штрихкод в каждый ярлык
+      for (var j = 0; j < qty; j++){
+        renderBarcode(document.getElementById('bc_' + j), lastItem.barcode);
+      }
+
+      window.__cennikQty = qty;
+      window.print();
+    }
+
+    function renderBarcode(svgEl, code){
+      var format = 'CODE128';
+      if (/^\d{13}$/.test(code)) format = 'EAN13';
+      else if (/^\d{12}$/.test(code)) format = 'UPC';
+      else if (/^\d{8}$/.test(code)) format = 'EAN8';
+      try {
+        JsBarcode(svgEl, code, { format: format, displayValue: true, fontSize: 13, height: 34, margin: 0 });
+      } catch (e1) {
+        try {
+          JsBarcode(svgEl, code, { format: 'CODE128', displayValue: true, fontSize: 13, height: 34, margin: 0 });
+        } catch (e2) { /* печатаем без графики штрихкода */ }
+      }
+    }
+
+    window.addEventListener('afterprint', function(){
+      if (lastItem) {
+        var qty = window.__cennikQty || 1;
+        var logUrl = SCRIPT_URL + '?action=log'
+          + '&barcode=' + encodeURIComponent(lastItem.barcode)
+          + '&productId=' + encodeURIComponent(lastItem.productId)
+          + '&name=' + encodeURIComponent(lastItem.name)
+          + '&price=' + encodeURIComponent(lastItem.price)
+          + '&qty=' + encodeURIComponent(qty);
+        fetch(logUrl).catch(function(){ /* лог не критичен для печати */ });
+      }
+      setStatus('Напечатано ✓');
+      unlockSoon();
+    });
+
+    // подстраховка: если afterprint не сработал (бывает в отдельных браузерах)
+    function unlockSoon(){
+      setTimeout(function(){ locked = false; }, 1200);
+    }
+
+    function formatPrice(p){
+      var n = Number(p) || 0;
+      return n.toLocaleString('ru-RU', { maximumFractionDigits: n % 1 ? 2 : 0 });
+    }
+    function escapeHtml(s){
+      return String(s == null ? '' : s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+  </script>
+</body>
+</html>
